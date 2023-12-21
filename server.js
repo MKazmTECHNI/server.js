@@ -72,6 +72,8 @@ app.post("/register", (req, res) => {
           }
 
           // Send a success response
+
+          console.log("Poprawny username");
           return res.json({ message: "User registered successfully" });
         }
       );
