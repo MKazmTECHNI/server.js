@@ -42,6 +42,15 @@ app.get("/healthcheck", (req, res) => {
 app.post("/register", (req, res) => {
   const { username, email, password } = req.body;
 
+  // CHECK IF TECHNISCHOOLS EMAIL
+  const regex = /^([0-9]{3})_([a-z]{6})_waw@technischools.com$/;
+  const isValidEmail = regex.test(email);
+  if (isValidEmail) {
+    console.log("Adres email jest poprawny!");
+  } else {
+    return res.status(409).json({ message: "Wrong email" });
+  }
+
   // Check if a user with the given username already exists
   db.get("SELECT * FROM users WHERE username = ?", [username], (err, row) => {
     if (err) {
