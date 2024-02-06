@@ -3,6 +3,7 @@ const express = require("express");
 const sqlite3 = require("sqlite3").verbose();
 const bodyParser = require("body-parser");
 const cors = require("cors");
+const rateLimit = require("express-rate-limit");
 
 const app = express();
 const PORT = 8080;
@@ -10,6 +11,11 @@ const PORT = 8080;
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use(cors());
+
+const MAX_ATTEMPTS = 10; // Maximum allowed registration attempts per IP address
+const RESET_TIMEOUT = 60 * 60 * 1000; // Time in milliseconds after attempts are reset (1 hour)
+
+let attemptCounts = {}; // Object to store attempt counts for each IP address
 
 // Create a new SQLite in-memory database
 const db = new sqlite3.Database("mainDatabase");
@@ -41,6 +47,7 @@ app.get("/healthcheck", (req, res) => {
 // Handle registration request
 app.post("/register", (req, res) => {
   const { username, email, password } = req.body;
+  const ipAddress = req.ip; // Get user's IP address
 
   // CHECK IF TECHNISCHOOLS EMAIL
   const regex = /^u([0-9]{3})_([a-z]{6})_waw@technischools.com$/;
@@ -50,6 +57,17 @@ app.post("/register", (req, res) => {
   } else {
     return res.status(409).json({ message: "Zaloguj się emailem szkolnym" });
   }
+
+  // Initialize or retrieve attempt count for current IP
+  const attempts = attemptCounts[ipAddress] || 0;
+  // Check if attempt limit exceeded
+  if (attempts >= MAX_ATTEMPTS) {
+    return res.status(429).json({
+      message: "Too many registration attempts. Please try again later.",
+    });
+  }
+  // Track the attempt
+  attemptCounts[ipAddress] = attempts + 1;
 
   // Check if a user with the given username already exists
   db.get("SELECT * FROM users WHERE username = ?", [username], (err, row) => {
@@ -82,12 +100,15 @@ app.post("/register", (req, res) => {
 
           // Send a success response
 
-          console.log("Zarejestrowano");
+          console.log("Zarejestrowano" + email);
           return res.json({ message: "User registered successfully" });
         }
       );
     });
   });
+  setTimeout(() => {
+    attemptCounts[ipAddress] = 0;
+  }, RESET_TIMEOUT);
 });
 
 // Handle login request
