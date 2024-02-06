@@ -43,12 +43,12 @@ app.post("/register", (req, res) => {
   const { username, email, password } = req.body;
 
   // CHECK IF TECHNISCHOOLS EMAIL
-  const regex = /^([0-9]{3})_([a-z]{6})_waw@technischools.com$/;
+  const regex = /^u([0-9]{3})_([a-z]{6})_waw@technischools.com$/;
   const isValidEmail = regex.test(email);
   if (isValidEmail) {
     console.log("Adres email jest poprawny!");
   } else {
-    return res.status(409).json({ message: "Wrong email" });
+    return res.status(409).json({ message: "Zaloguj się emailem szkolnym" });
   }
 
   // Check if a user with the given username already exists
