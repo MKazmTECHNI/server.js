@@ -1,143 +1,379 @@
-// By mr. AT, ChatGPT, and some MKazm
 const express = require("express");
-const sqlite3 = require("sqlite3").verbose();
-const bodyParser = require("body-parser");
 const cors = require("cors");
-const rateLimit = require("express-rate-limit");
+const { Client } = require("pg");
+const format = require("pg-format");
+const bcrypt = require("bcrypt");
 
 const app = express();
-const PORT = 8080;
+const port = 3000;
 
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
+// Enable CORS middleware
 app.use(cors());
 
-const MAX_ATTEMPTS = 10; // Maximum allowed registration attempts per IP address
-const RESET_TIMEOUT = 60 * 60 * 1000; // Time in milliseconds after attempts are reset (1 hour)
+// Enable JSON parsing middleware
+app.use(express.json());
 
-let attemptCounts = {}; // Object to store attempt counts for each IP address
+// PostgreSQL configuration
+const connectionString =
+  "postgres://technigramdatabase_user:axCfw9508S6SWhjzllXvWuBlnM88gdZ2@dpg-cpmcutdds78s73ag6s7g-a.frankfurt-postgres.render.com/technigramdatabase";
 
-// Create a new SQLite in-memory database
-const db = new sqlite3.Database("mainDatabase");
-// Create a users table if it doesn't exist
-db.run(
-  `
-  CREATE TABLE IF NOT EXISTS users (
-    username TEXT NOT NULL,
-    email TEXT NOT NULL,
-    password TEXT NOT NULL
-    )
-    `,
-  (err) => {
-    if (err != null) {
-      console.log("Error w Creating Table.", err);
-    }
-  }
-);
+const sslConfig = {
+  rejectUnauthorized: false,
+};
 
-app.use(bodyParser.urlencoded({ extended: true }));
-
-// Serve static files from the current directory
-app.use(express.static(__dirname));
-
-app.get("/healthcheck", (req, res) => {
-  res.status(200).json({ message: "ok" });
-});
-
-// Handle registration request
-app.post("/register", (req, res) => {
-  const { username, email, password } = req.body;
-  const ipAddress = req.ip; // Get user's IP address
-
-  // CHECK IF TECHNISCHOOLS EMAIL
-  const regex = /^u([0-9]{3})_([a-z]{6})_waw@technischools.com$/;
-  const isValidEmail = regex.test(email);
-  if (isValidEmail) {
-    console.log("Adres email jest poprawny!");
-  } else {
-    return res.status(409).json({ message: "Zaloguj się emailem szkolnym" });
-  }
-
-  // Initialize or retrieve attempt count for current IP
-  const attempts = attemptCounts[ipAddress] || 0;
-  // Check if attempt limit exceeded
-  if (attempts >= MAX_ATTEMPTS) {
-    return res.status(429).json({
-      message: "Too many registration attempts. Please try again later.",
-    });
-  }
-  // Track the attempt
-  attemptCounts[ipAddress] = attempts + 1;
-
-  // Check if a user with the given username already exists
-  db.get("SELECT * FROM users WHERE username = ?", [username], (err, row) => {
-    if (err) {
-      console.log("Error w SELECT username.");
-      return res.status(500).json({ error: err });
-    }
-
-    if (row) {
-      return res.status(409).json({ message: "Username is already in use" });
-    }
-    db.get("SELECT * FROM users WHERE email = ?", [email], (err, row) => {
-      if (err) {
-        console.log("Error w SELECT email.");
-        return res.status(500).json({ error: err });
-      }
-
-      if (row) {
-        return res.status(409).json({ message: "Email is already in use" });
-      }
-
-      // Add the new user to the database
-      db.run(
-        "INSERT INTO users (username, email, password) VALUES (?, ?, ?)",
-        [username, email, password],
-        (err) => {
-          if (err) {
-            return res.status(500).json({ error: err });
-          }
-
-          // Send a success response
-
-          console.log("Zarejestrowano" + email);
-          return res.json({ message: "User registered successfully" });
-        }
-      );
-    });
+// Function to fetch post details including creator's username and comments
+async function fetchPostDetails(post_id) {
+  const client = new Client({
+    connectionString: connectionString,
+    ssl: sslConfig,
   });
-  setTimeout(() => {
-    attemptCounts[ipAddress] = 0;
-  }, RESET_TIMEOUT);
-});
 
-// Handle login request
-app.post("/login", (req, res) => {
-  const { username, email, password } = req.body;
-  db.get("SELECT * FROM users WHERE username = ?", [username], (err, row) => {
-    if (err != null) {
-      console.log("Error w SELECT.");
-      return res.status(500).json({ error: err });
-    }
+  try {
+    await client.connect();
 
-    if (row) {
-      console.log("Poprawny username");
-      //   return res.status(200).json({ message: "Poprawny username" });
-      if (row) {
-        const dbPassword = row.password;
-        if (password === dbPassword) {
-          console.log("Poprawne hasło");
-          return res.status(200).json({ message: "Poprawne hasło" });
-        } else {
-          console.log("Niepoprawne hasło");
-          return res.status(401).json({ error: "Niepoprawne hasło" });
-        }
-      }
+    // First query to fetch title, content, creator_id, and likes from posts
+    const selectPostQuery = {
+      text: `
+        SELECT title, content, creator_id, likes FROM posts
+        WHERE post_id = $1
+      `,
+      values: [post_id],
+    };
+
+    const postResult = await client.query(selectPostQuery);
+    if (postResult.rows.length === 0) {
+      throw new Error("Post not found");
     }
+    const post = postResult.rows[0];
+
+    // Second query to fetch username from users based on creator_id
+    const selectUserQuery = {
+      text: `
+        SELECT username FROM users
+        WHERE id = $1
+      `,
+      values: [post.creator_id],
+    };
+
+    const userResult = await client.query(selectUserQuery);
+    if (userResult.rows.length === 0) {
+      throw new Error("User not found");
+    }
+    const username = userResult.rows[0].username;
+
+    // Third query to fetch comments for the post
+    const selectCommentsQuery = {
+      text: `
+        SELECT comment_creator_id, comment_content FROM comments
+        WHERE post_id = $1
+      `,
+      values: [post_id],
+    };
+
+    const commentsResult = await client.query(selectCommentsQuery);
+    const comments = await Promise.all(
+      commentsResult.rows.map(async (comment) => {
+        const selectCommentUserQuery = {
+          text: `
+          SELECT username FROM users
+          WHERE id = $1
+        `,
+          values: [comment.comment_creator_id],
+        };
+        const commentUserResult = await client.query(selectCommentUserQuery);
+        const commentUsername = commentUserResult.rows[0].username;
+
+        return {
+          ...comment,
+          username: commentUsername,
+        };
+      })
+    );
+
+    // Return combined data
+    return {
+      title: post.title,
+      content: post.content,
+      creator_id: post.creator_id,
+      creatorUsername: username,
+      likes: post.likes,
+      comments: comments,
+    };
+  } catch (err) {
+    console.error("Error fetching data from PostgreSQL:", err);
+    throw err;
+  } finally {
+    await client.end();
+  }
+}
+
+// Route to fetch number of posts
+app.get("/posts/count", async (req, res) => {
+  const client = new Client({
+    connectionString: connectionString,
+    ssl: sslConfig,
   });
+
+  try {
+    await client.connect();
+
+    const countQuery = "SELECT COUNT(*) FROM posts";
+    const result = await client.query(countQuery);
+    const numberOfPosts = parseInt(result.rows[0].count);
+
+    res.json({ numberOfPosts });
+  } catch (err) {
+    console.error("Error fetching post count:", err);
+    res.status(500).json({ error: "Failed to fetch post count" });
+  } finally {
+    await client.end();
+  }
 });
 
-// Start the server on the specified port
-app.listen(PORT, () => {
-  console.log(`Server is running on http://localhost:${PORT}`);
+// Route to fetch post details
+app.get("/posts/:post_id", async (req, res) => {
+  const post_id = req.params.post_id;
+
+  try {
+    const postDetails = await fetchPostDetails(post_id);
+    res.json(postDetails);
+  } catch (err) {
+    res.status(500).json({ error: "Failed to fetch post details" });
+  }
+});
+
+// Route to add a comment to a post
+app.post("/posts/:post_id/comments", async (req, res) => {
+  const post_id = req.params.post_id;
+  const { comment_content, comment_creator_id } = req.body;
+
+  if (!comment_content || !comment_creator_id) {
+    return res
+      .status(400)
+      .json({ error: "Comment content and creator ID are required" });
+  }
+
+  const client = new Client({
+    connectionString: connectionString,
+    ssl: sslConfig,
+  });
+
+  try {
+    await client.connect();
+
+    const insertCommentQuery = {
+      text: `
+        INSERT INTO comments (post_id, comment_creator_id, comment_content)
+        VALUES ($1, $2, $3)
+        RETURNING comment_id, comment_creator_id, comment_content
+      `,
+      values: [post_id, comment_creator_id, comment_content],
+    };
+
+    const insertResult = await client.query(insertCommentQuery);
+    const newComment = insertResult.rows[0];
+
+    // Fetch the username for the new comment creator
+    const selectCommentUserQuery = {
+      text: `
+        SELECT username FROM users
+        WHERE id = $1
+      `,
+      values: [newComment.comment_creator_id],
+    };
+
+    const commentUserResult = await client.query(selectCommentUserQuery);
+    const commentUsername = commentUserResult.rows[0].username;
+
+    res.json({
+      ...newComment,
+      username: commentUsername,
+    });
+  } catch (err) {
+    console.error("Error adding comment:", err);
+    res.status(500).json({ error: "Failed to add comment" });
+  } finally {
+    await client.end();
+  }
+});
+
+// Update the existing server.js file to include login functionality
+
+// Route to handle login
+app.post("/login", async (req, res) => {
+  const { username, password } = req.body;
+
+  const client = new Client({
+    connectionString: connectionString,
+    ssl: sslConfig,
+  });
+
+  try {
+    await client.connect();
+
+    // Retrieve hashed password from database
+    const selectUserQuery = {
+      text: `
+              SELECT id, username, password FROM users
+              WHERE username = $1
+          `,
+      values: [username],
+    };
+
+    const selectUserResult = await client.query(selectUserQuery);
+    if (selectUserResult.rows.length === 0) {
+      return res.status(401).json({ error: "Invalid username or password" });
+    }
+
+    const user = selectUserResult.rows[0];
+
+    // Compare hashed password with provided password
+    const passwordMatch = await bcrypt.compare(password, user.password);
+    if (!passwordMatch) {
+      return res.status(401).json({ error: "Invalid username or password" });
+    }
+
+    // If login successful, return user data
+    res.status(200).json({
+      id: user.id,
+      username: user.username,
+    });
+  } catch (error) {
+    console.error("Login error:", error);
+    res.status(500).json({ error: "Failed to log in" });
+  } finally {
+    await client.end();
+  }
+});
+app.post("/register", async (req, res) => {
+  const { username, email, password } = req.body;
+
+  const client = new Client({
+    connectionString: connectionString,
+    ssl: sslConfig,
+  });
+
+  try {
+    await client.connect();
+
+    // Check if username already exists
+    const checkUserQuery = {
+      text: `
+              SELECT id FROM users
+              WHERE username = $1
+          `,
+      values: [username],
+    };
+
+    const checkUserResult = await client.query(checkUserQuery);
+    if (checkUserResult.rows.length > 0) {
+      return res.status(409).json({ error: "Username already exists" });
+    }
+
+    // Hash the password
+    const hashedPassword = await bcrypt.hash(password, 10); // 10 is the salt rounds
+
+    // Insert new user into the database with hashed password
+    const insertUserQuery = {
+      text: `
+              INSERT INTO users (username, email, password)
+              VALUES ($1, $2, $3)
+              RETURNING id, email, username
+          `,
+      values: [username, email, hashedPassword],
+    };
+
+    const insertUserResult = await client.query(insertUserQuery);
+    const newUser = insertUserResult.rows[0];
+
+    res.status(201).json({
+      id: newUser.id,
+      username: newUser.username,
+      email: newUser.email,
+    });
+  } catch (error) {
+    console.error("Registration error:", error);
+    res.status(500).json({ error: "Failed to register user" });
+  } finally {
+    await client.end();
+  }
+});
+
+// Route to fetch user details by user ID
+app.get("/users/:user_id", async (req, res) => {
+  const user_id = req.params.user_id;
+
+  const client = new Client({
+    connectionString: connectionString,
+    ssl: sslConfig,
+  });
+
+  try {
+    await client.connect();
+
+    const selectUserQuery = {
+      text: `
+        SELECT username FROM users
+        WHERE id = $1
+      `,
+      values: [user_id],
+    };
+
+    const userResult = await client.query(selectUserQuery);
+    if (userResult.rows.length === 0) {
+      throw new Error("User not found");
+    }
+
+    const user = userResult.rows[0];
+    res.json(user);
+  } catch (error) {
+    console.error("Error fetching user details:", error);
+    res.status(500).json({ error: "Failed to fetch user details" });
+  } finally {
+    await client.end();
+  }
+});
+
+// Route to add a new post
+app.post("/posts", async (req, res) => {
+  const { creator_id, title, content } = req.body;
+
+  if (!creator_id || !title || !content) {
+    return res
+      .status(400)
+      .json({ error: "Creator ID, title, and content are required" });
+  }
+
+  const client = new Client({
+    connectionString: connectionString,
+    ssl: sslConfig,
+  });
+
+  try {
+    await client.connect();
+
+    const insertPostQuery = {
+      text: `
+        INSERT INTO posts (creator_id, title, content)
+        VALUES ($1, $2, $3)
+        RETURNING post_id, creator_id, title, content, likes, created_at
+      `,
+      values: [creator_id, title, content],
+    };
+
+    const insertResult = await client.query(insertPostQuery);
+    const newPost = insertResult.rows[0];
+
+    res.status(201).json(newPost);
+  } catch (err) {
+    console.error("Error adding post:", err);
+    res.status(500).json({ error: "Failed to add post" });
+  } finally {
+    await client.end();
+  }
+});
+
+// Start the server
+app.listen(port, () => {
+  console.log(`Server is running at http://localhost:${port}`);
 });
